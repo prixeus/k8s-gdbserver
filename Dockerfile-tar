@@ -1,0 +1,22 @@
+# TODO alpine version as argument
+# TODO repo as argument
+# TODO tar version as argument
+
+FROM alpine:3.16.2
+
+RUN apk add curl gcc make musl-dev
+
+RUN curl -LO http://ftp.gnu.org/gnu/tar/tar-1.34.tar.xz
+
+RUN mkdir build && \
+        cd build && \
+        tar xf ../tar-1.34.tar.xz
+
+RUN cd build/tar-1.34 && \
+        FORCE_UNSAFE_CONFIGURE=1 LDFLAGS=-static ./configure
+
+RUN cd build/tar-1.34 && \
+        make -j && \
+        cp src/tar ../.
+
+RUN strip -s -R .comment -R .gnu.version --strip-unneeded /build/tar

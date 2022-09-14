@@ -1,0 +1,27 @@
+# TODO alpine version as argument
+# TODO repo as argument
+# TODO gdb version as argument
+
+FROM alpine:3.16.2
+
+RUN apk add curl gcc g++ make gettext-static patch gettext-dev
+
+RUN curl -LO http://ftp.gnu.org/gnu/gdb/gdb-12.1.tar.xz
+
+RUN mkdir build && \
+        cd build && \
+        tar xf ../gdb-12.1.tar.xz
+
+RUN cd build/gdb-12.1 && \
+        ./configure --disable-binutils --disable-gas --disable-gprof --disable-ld --with-statis-standard-libraries --disable-source-highlight
+
+COPY gdbserver-static-hack.patch /build/gdb-12.1/gdbserver-static-hack.patch
+
+RUN cd build/gdb-12.1 && \
+        patch -p0 -i gdbserver-static-hack.patch
+
+RUN cd build/gdb-12.1 && \
+        make -j all-gdbserver && \
+        cp gdbserver/gdbserver ../.
+
+RUN strip -s -R .comment -R .gnu.version --strip-unneeded /build/gdbserver
