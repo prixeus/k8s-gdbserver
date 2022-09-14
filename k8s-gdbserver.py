@@ -94,6 +94,20 @@ class K8sGDBServer():
         self.StopGDBServerRemotely()
         self.StopPortForward()
 
+    def GenerateCoreFile(self):
+        logging.info("Generating core file with gdb")
+        output, err = pexpect.run("gdb -batch -ex 'set pagination off' -ex 'target extended-remote localhost:{local_port}' -ex 'gcore {corefile}' -ex 'disconnect' -ex 'set confirm off' -ex quit -ex quit".format(
+            local_port=self.local_port,
+            corefile=self.args.gcore), withexitstatus=True)
+
+        strOutput = output.decode("utf-8")
+        if err != 0:
+            raise GDBCommandException(strOutput)
+
+        if self.args.i_want_to_see_gdb_output:
+            logging.debug("GDB command output:\n{}".format(strOutput))
+        logging.debug("Core file generation finished")
+
     def PrepareWithEphemeralContainer(self):
         logging.info("Ephemeral containers are supported, so using 'kubectl debug' for gdbserver")
 
@@ -218,6 +232,8 @@ class K8sGDBServer():
         if err != 0:
             raise GDBCommandException(strOutput)
 
+        if self.args.i_want_to_see_gdb_output:
+            logging.debug("GDB command output:\n{}".format(strOutput))
         logging.debug("Remote gdbserver session closed")
 
     def GetContainerName(self):
@@ -294,7 +310,9 @@ if __name__ == "__main__":
     parser.add_argument("--kubectl_cmd", default="kubectl", help="path to kubectl executable")
     parser.add_argument("--docker_cmd", default="docker", help="path to docker executable")
     parser.add_argument("--log", dest="logLevel", choices=['DEBUG', "INFO", "ERROR"], default="INFO", help="Set the log level")
+    parser.add_argument("--i_want_to_see_gdb_output",  default=False, action="store_true", help="See the gdb command output in logs")
     parser.add_argument("--cleanup_prev_gdbserver", default=False, action="store_true", help="try do a cleanup for previous gdbserver session")
+    parser.add_argument("--gcore", default=None, type=str, help="create core file at given path")
 
     # Parse the arguments
     args = parser.parse_args()
@@ -319,15 +337,19 @@ if __name__ == "__main__":
         if args.cleanup_prev_gdbserver:
             k8sGDBServer.CleanupPrevGDBServerSession()
         else:
-            logging.debug("Setting SIGINT handler")
-            signal.signal(signal.SIGINT, k8sGDBServer.SigIntHandler)
+            if args.gcore is None:
+                logging.debug("Setting SIGINT handler")
+                signal.signal(signal.SIGINT, k8sGDBServer.SigIntHandler)
 
             logging.debug("Initiate the gdbserver debug")
             k8sGDBServer.StartDebug()
 
-            logging.info("Press Ctrl+C to close the gdbserver and portforward")
-
-            signal.pause()
+            if args.gcore is None:
+                logging.info("Press Ctrl+C to close the gdbserver and portforward")
+                signal.pause()
+            else:
+                k8sGDBServer.GenerateCoreFile()
+                k8sGDBServer.StopDebug()
 
     except Exception as e:
         logging.error("Exception occurred", exc_info=True)
