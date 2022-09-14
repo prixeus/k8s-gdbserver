@@ -1,5 +1,6 @@
 import argparse
 import json
+import logging
 import os
 import pexpect
 import pkg_resources
@@ -29,6 +30,7 @@ class GDBCommandException(Exception):
 
 
 def GetKubernetesVersion(kubectl_cmd):
+    logging.debug("Getting the Kubernetes server version")
     output, err = pexpect.run(kubectl_cmd + " version --output=json", withexitstatus=True)
     if err != 0:
         raise KubectlError("Cannot get kubernetes version")
@@ -36,8 +38,11 @@ def GetKubernetesVersion(kubectl_cmd):
     j = json.loads(output)
 
     if "serverVersion" in j and "gitVersion" in j["serverVersion"]:
-        return j["serverVersion"]["gitVersion"]
+        version = j["serverVersion"]["gitVersion"]
+        logging.debug("The kubernetes server version is: " + version)
+        return version
 
+    logging.warning("Cannot get the kubernetes version")
     return ""
 
 class K8sGDBServer():
@@ -61,6 +66,7 @@ class K8sGDBServer():
         else:
             if not self.IsExecutableInContainerImage("tar"):
                 if not self.IsExecutableInContainerImage("tee"):
+                    logging.critical("Cannot move gdbserver into the container")
                     exit(-1)
                 else:
                     self.TryToAddTarExecutable()
@@ -74,13 +80,16 @@ class K8sGDBServer():
             self.StopDebug()
             raise
 
-        print("Port fordwarded gdbserver is listening on localhost:" + str(self.local_port))
+        logging.info("Port fordwarded gdbserver is listening on localhost:" + str(self.local_port))
 
     def StopDebug(self):
+        logging.info("Stopping debug")
         self.StopGDBServer()
         self.StopPortForward()
 
     def PrepareWithEphemeralContainer(self):
+        logging.info("Ephemeral containers are supported, so using 'kubectl debug' for gdbserver")
+
         self.gdbServerCmd = "{kubectl} debug -n {namespace} {pod} --image=albertdupre/gdbserver:latest --target={pod} -i -- sh -c 'sleep 5 ; gdbserver --attach localhost:{port} {pid}'".format(
             kubectl=self.args.kubectl_cmd,
             namespace=self.args.namespace,
@@ -89,9 +98,14 @@ class K8sGDBServer():
             pid=self.args.pid)
 
     def PrepareWithKubectlCP(self):
+        logging.info("Using the kubectl cp for setting up gdbserver")
+
         if not self.IsExecutableInContainerImage('gdbserver'):
+            logging.debug("'gdbserver' is not present on the container")
+
             self.BuildStaticBinary("gdbserver")
 
+            logging.debug("Copying the 'gdbserver' binary to the container")
             output, err = pexpect.run("{kubectl} cp ./gdbserver {namespace}/{pod}:/bin/gdbserver -c {container}".format(
                 kubectl=self.args.kubectl_cmd,
                 namespace=self.args.namespace,
@@ -108,13 +122,8 @@ class K8sGDBServer():
             port=self.args.remote_port,
             pid=self.args.pid)
 
-        output, err = pexpect.run("{kubectl} cp ./gdbserver {namespace}/{pod}:/bin/gdbserver -c {container}".format(
-            kubectl=self.args.kubectl_cmd,
-            namespace=self.args.namespace,
-            pod=self.args.pod,
-            container=self.args.container), withexitstatus=True)
-
     def IsExecutableInContainerImage(self, execName):
+        logging.debug("Finding out that the {} is present in container".format(execName))
         output, err = pexpect.run("{kubectl} exec -n {namespace} {pod} -c {container} -- {execName} --help".format(
             kubectl=self.args.kubectl_cmd,
             namespace=self.args.namespace,
@@ -122,29 +131,38 @@ class K8sGDBServer():
             container=self.args.container,
             execName=execName), withexitstatus=True)
 
-        return err == 0
+        if err != 0:
+            logging.warning("{} is not present in container".format(execName))
+            return False
+
+        logging.debug("{} is present in container".format(execName))
+        return True
 
     def TryToAddTarExecutable(self):
-        if not self.IsExecutableInContainerImage('tar') or True:
-            self.BuildStaticBinary("tar")
+        logging.debug("Trying to add static 'tar' executable to the container")
 
-            output, err = pexpect.run("sh -c 'cat ./tar | {kubectl} exec -i -n {namespace} {pod} -c {container} -- tee /bin/tar'".format(
-                kubectl=self.args.kubectl_cmd,
-                namespace=self.args.namespace,
-                pod=self.args.pod,
-                container=self.args.container), withexitstatus=True)
-            if err != 0:
-                raise KubectlError("Error during sending tar executable to remote host: " + output.decode("utf-8"))
+        self.BuildStaticBinary("tar")
 
-            output, err = pexpect.run("{kubectl} exec -n {namespace} {pod} -c {container} -- chmod +x /bin/tar".format(
-                kubectl=self.args.kubectl_cmd,
-                namespace=self.args.namespace,
-                pod=self.args.pod,
-                container=self.args.container), withexitstatus=True)
-            if err != 0:
-                raise KubectlError("Error during chmod of tar: " + output.decode("utf-8"))
+        logging.debug("Copying the 'tar' executable to the container")
+        output, err = pexpect.run("sh -c 'cat ./tar | {kubectl} exec -i -n {namespace} {pod} -c {container} -- tee /bin/tar'".format(
+            kubectl=self.args.kubectl_cmd,
+            namespace=self.args.namespace,
+            pod=self.args.pod,
+            container=self.args.container), withexitstatus=True)
+        if err != 0:
+            raise KubectlError("Error during sending tar executable to remote host: " + output.decode("utf-8"))
+
+        logging.debug("Adding executable attribute to the 'tar' in the container")
+        output, err = pexpect.run("{kubectl} exec -n {namespace} {pod} -c {container} -- chmod +x /bin/tar".format(
+            kubectl=self.args.kubectl_cmd,
+            namespace=self.args.namespace,
+            pod=self.args.pod,
+            container=self.args.container), withexitstatus=True)
+        if err != 0:
+            raise KubectlError("Error during chmod of tar: " + output.decode("utf-8"))
 
     def StartPortForward(self):
+        logging.info("Starting the port forward to the container")
         self.portForwardChild = pexpect.spawn("{kubectl} port-forward -n {namespace} pod/{pod} {local_port}:{remote_port}".format(
             kubectl=self.args.kubectl_cmd,
             namespace=self.args.namespace,
@@ -155,31 +173,50 @@ class K8sGDBServer():
         self.portForwardChild.expect("Forwarding from .* ->")
 
         self.local_port = self.portForwardChild.after.decode("utf-8").splitlines()[0].split(":")[1].split(" -> ")[0]
+        logging.debug("The local gdbserver port is " + self.local_port)
 
     def StopPortForward(self):
+        logging.debug("Sending SIGINT for portforward")
         self.portForwardChild.sendintr()
         self.portForwardChild.wait()
+        logging.debug("Portforward stopped")
 
     def StartGDBServer(self):
+        logging.info("Starting gdbserver")
         self.gdbServerChild = pexpect.spawn(self.gdbServerCmd)
 
-        self.gdbServerChild.expect(".*Listening on port ")
+        index = self.gdbServerChild.expect([".*Listening on port ", ".*Can't bind address: Address in use."])
+        if index == 0:
+            logging.debug("The remote gdbserver port is " + str(self.args.remote_port))
+        else:
+            logging.error("The port is occupied")
+            raise GDBCommandException("Address in use")
 
     def StopGDBServer(self):
+        logging.info("Stopping gdbserver")
         self.StopGDBServerRemotely()
 
         if self.gdbServerChild.isalive():
+            logging.debug("Sending SIGINT to local gdbserver session")
             self.gdbServerChild.sendintr()
             self.gdbServerChild.wait()
+            logging.debug("Gdbserver stopped")
 
     def StopGDBServerRemotely(self):
-        output, err = pexpect.run("gdb -ex 'set pagination off' -ex 'target extended-remote localhost:{}' -ex 'monitor exit' -ex 'set confirm off' -ex quit -ex quit".format(
+        logging.debug("Stopping the remote gdbserver session")
+        output, err = pexpect.run("gdb -batch -ex 'set pagination off' -ex 'target extended-remote localhost:{}' -ex 'monitor exit' -ex 'set confirm off' -ex quit -ex quit".format(
             self.local_port), withexitstatus=True)
+
+        strOutput = output.decode("utf-8")
         if err != 0:
-            raise GDBCommandException(output.decode("utf-8"))
+            raise GDBCommandException(strOutput)
+
+        logging.debug("Remote gdbserver session closed")
 
     def GetContainerName(self):
         if not self.args.container:
+            logging.debug("Finding out the container name since it isn't provided")
+
             output, err = pexpect.run("{kubectl} get pods {pod} -n {namespace} -o jsonpath='{{.spec.containers[*].name}}'".format(
                 kubectl=self.args.kubectl_cmd,
                 namespace=self.args.namespace,
@@ -196,7 +233,10 @@ class K8sGDBServer():
             else:
                 raise ParseError("There is more than one container in pod. Please specify one of them: " + ", ".join(lines))
 
+        logging.debug("The container name for debug is: " + self.args.container)
+
     def BuildStaticBinary(self, execName):
+        logging.debug("Building '{}' static binary with docker")
         output, err = pexpect.run("{docker} build -t {execName}-static-{postfix} -f Dockerfile-{execName} .".format(
             docker=self.args.docker_cmd,
             execName=execName,
@@ -204,6 +244,7 @@ class K8sGDBServer():
         if err != 0:
             raise BuildStaticBinaryException("Cannot build static bin: " + output.decode("utf-8"))
 
+        logging.debug("Creating a temporary container from built image")
         output, err = pexpect.run("{docker} create {execName}-static-{postfix}".format(
             docker=self.args.docker_cmd,
             execName=execName,
@@ -212,12 +253,15 @@ class K8sGDBServer():
             raise BuildStaticBinaryException("Cannot run docker create: " + output.decode("utf-8"))
 
         containerID = output.decode("utf-8").strip()
+        logging.debug("New container ID: " + containerID)
 
+        logging.debug("Copying the static binary from the container")
         cpOutput, cpErr = pexpect.run("{docker} cp {containerID}:/build/{execName} ./{execName}".format(
             docker=self.args.docker_cmd,
             containerID=containerID,
             execName=execName), withexitstatus=True)
 
+        logging.debug("Remove the temporary docker container")
         output, err = pexpect.run("{docker} rm {containerID}".format(
             docker=self.args.docker_cmd,
             containerID=containerID), withexitstatus=True)
@@ -242,28 +286,36 @@ if __name__ == "__main__":
     parser.add_argument("-r", "--remote_port", default=2000, type=int, help="remote port in container to use the gdbserver")
     parser.add_argument("--kubectl_cmd", default="kubectl", help="path to kubectl executable")
     parser.add_argument("--docker_cmd", default="docker", help="path to docker executable")
+    parser.add_argument("--log", dest="logLevel", choices=['DEBUG', "INFO", "ERROR"], default="INFO", help="Set the log level")
 
     # Parse the arguments
     args = parser.parse_args()
 
-    # Evaluate that the "kubectl" command is found
-    if not pexpect.which(args.kubectl_cmd):
-        raise ExecutableNotFound(args.kubectl_cmd)
+    logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=getattr(logging, args.logLevel))
 
-    # Evaluate that the "docker" command is found
-    if not pexpect.which(args.docker_cmd):
-        raise ExecutableNotFound(args.docker_cmd)
+    try:
+        logging.debug("Evaluate that the 'kubectl' command is found")
+        if not pexpect.which(args.kubectl_cmd):
+            raise ExecutableNotFound(args.kubectl_cmd)
 
-    # Evaluate that the "gdb" command is found
-    if not pexpect.which("gdb"):
-        raise ExecutableNotFound("gdb")
+        logging.debug("Evaluate that the 'docker' command is found")
+        if not pexpect.which(args.docker_cmd):
+            raise ExecutableNotFound(args.docker_cmd)
 
-    k8sGDBServer = K8sGDBServer(args)
+        logging.debug("Evaluate that the 'gdb' command is found")
+        if not pexpect.which("gdb"):
+            raise ExecutableNotFound("gdb")
 
-    signal.signal(signal.SIGINT, k8sGDBServer.SigIntHandler)
+        k8sGDBServer = K8sGDBServer(args)
 
-    k8sGDBServer.StartDebug()
+        logging.debug("Setting SIGINT handler")
+        signal.signal(signal.SIGINT, k8sGDBServer.SigIntHandler)
 
-    print("Press Ctrl+C to close the gdbserver and portforward")
+        logging.debug("Initiate the gdbserver debug")
+        k8sGDBServer.StartDebug()
 
-    signal.pause()
+        logging.info("Press Ctrl+C to close the gdbserver and portforward")
+
+        signal.pause()
+    except Exception as e:
+        logging.error("Exception occurred", exc_info=True)
