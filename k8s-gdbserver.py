@@ -87,6 +87,13 @@ class K8sGDBServer():
         self.StopGDBServer()
         self.StopPortForward()
 
+    def CleanupPrevGDBServerSession(self):
+        logging.info("Trying to cleanup previous gdbserver session in the container")
+        self.GetContainerName()
+        self.StartPortForward()
+        self.StopGDBServerRemotely()
+        self.StopPortForward()
+
     def PrepareWithEphemeralContainer(self):
         logging.info("Ephemeral containers are supported, so using 'kubectl debug' for gdbserver")
 
@@ -287,6 +294,7 @@ if __name__ == "__main__":
     parser.add_argument("--kubectl_cmd", default="kubectl", help="path to kubectl executable")
     parser.add_argument("--docker_cmd", default="docker", help="path to docker executable")
     parser.add_argument("--log", dest="logLevel", choices=['DEBUG', "INFO", "ERROR"], default="INFO", help="Set the log level")
+    parser.add_argument("--cleanup_prev_gdbserver", default=False, action="store_true", help="try do a cleanup for previous gdbserver session")
 
     # Parse the arguments
     args = parser.parse_args()
@@ -308,14 +316,18 @@ if __name__ == "__main__":
 
         k8sGDBServer = K8sGDBServer(args)
 
-        logging.debug("Setting SIGINT handler")
-        signal.signal(signal.SIGINT, k8sGDBServer.SigIntHandler)
+        if args.cleanup_prev_gdbserver:
+            k8sGDBServer.CleanupPrevGDBServerSession()
+        else:
+            logging.debug("Setting SIGINT handler")
+            signal.signal(signal.SIGINT, k8sGDBServer.SigIntHandler)
 
-        logging.debug("Initiate the gdbserver debug")
-        k8sGDBServer.StartDebug()
+            logging.debug("Initiate the gdbserver debug")
+            k8sGDBServer.StartDebug()
 
-        logging.info("Press Ctrl+C to close the gdbserver and portforward")
+            logging.info("Press Ctrl+C to close the gdbserver and portforward")
 
-        signal.pause()
+            signal.pause()
+
     except Exception as e:
         logging.error("Exception occurred", exc_info=True)
