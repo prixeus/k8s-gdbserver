@@ -111,12 +111,13 @@ class K8sGDBServer():
     def PrepareWithEphemeralContainer(self):
         logging.info("Ephemeral containers are supported, so using 'kubectl debug' for gdbserver")
 
-        self.gdbServerCmd = "{kubectl} debug -n {namespace} {pod} --image=albertdupre/gdbserver:latest --target={pod} -i -- sh -c 'sleep 5 ; gdbserver --attach localhost:{port} {pid}'".format(
+        self.gdbServerCmd = "{kubectl} debug -n {namespace} {pod} --image=albertdupre/gdbserver:latest --target={container} -i -- sh -c 'sleep 5 ; gdbserver --attach localhost:{port} {pid}'".format(
             kubectl=self.args.kubectl_cmd,
             namespace=self.args.namespace,
             pod=self.args.pod,
             port=self.args.remote_port,
-            pid=self.args.pid)
+            pid=self.args.pid,
+            container=self.args.container)
 
     def PrepareWithKubectlCP(self):
         logging.info("Using the kubectl cp for setting up gdbserver")
@@ -127,7 +128,7 @@ class K8sGDBServer():
             self.BuildStaticBinary("gdbserver")
 
             logging.debug("Copying the 'gdbserver' binary to the container")
-            output, err = pexpect.run("{kubectl} cp ./gdbserver {namespace}/{pod}:/bin/gdbserver -c {container}".format(
+            output, err = pexpect.run("{kubectl} cp ./gdbserver {namespace}/{pod}:/tmp/gdbserver -c {container}".format(
                 kubectl=self.args.kubectl_cmd,
                 namespace=self.args.namespace,
                 pod=self.args.pod,
@@ -135,7 +136,7 @@ class K8sGDBServer():
             if err != 0:
                 raise KubectlError("Cannot cp into the container: " + output.decode("utf-8"))
 
-        self.gdbServerCmd = "{kubectl} exec -n {namespace} {pod} -c {container} -- gdbserver --attach localhost:{port} {pid}".format(
+        self.gdbServerCmd = "{kubectl} exec -n {namespace} {pod} -c {container} -- /tmp/gdbserver --attach localhost:{port} {pid}".format(
             kubectl=self.args.kubectl_cmd,
             namespace=self.args.namespace,
             pod=self.args.pod,
@@ -259,7 +260,7 @@ class K8sGDBServer():
         logging.debug("The container name for debug is: " + self.args.container)
 
     def BuildStaticBinary(self, execName):
-        logging.debug("Building '{}' static binary with docker")
+        logging.debug("Building '{execName}' static binary with docker".format(execName=execName))
         output, err = pexpect.run("{docker} build -t {execName}-static-{postfix} -f Dockerfile-{execName} .".format(
             docker=self.args.docker_cmd,
             execName=execName,
