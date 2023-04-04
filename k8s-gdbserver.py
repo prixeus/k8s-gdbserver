@@ -51,6 +51,7 @@ class K8sGDBServer():
         self.portForwardChild = None
         self.gdbServerCmd = ""
         self.gdbServerChild = None
+        self.proxyChild = None
 
         self.version = GetKubernetesVersion(args.kubectl_cmd)
 
@@ -84,6 +85,10 @@ class K8sGDBServer():
 
     def StopDebug(self):
         logging.info("Stopping debug")
+
+        if self.args.bypass_liveness_probe:
+            self.RestoreLivenessProbe()
+
         self.StopGDBServer()
         self.StopPortForward()
 
@@ -107,6 +112,90 @@ class K8sGDBServer():
         if self.args.i_want_to_see_gdb_output:
             logging.debug("GDB command output:\n{}".format(strOutput))
         logging.debug("Core file generation finished")
+
+    def BypassLivenessProbe(self):
+        logging.info("Bypassing liveness probe")
+
+        #TODO find out the type of liveness probe
+
+        self.BypassHTTPLivenessProbe()
+
+    def BypassHTTPLivenessProbe(self):
+        logging.debug("Bypassing http liveness probe")
+
+        if not self.IsExecutableInContainerImage("proxy"):
+            logging.debug("Building a simple static http proxy")
+            output, err = pexpect.run("sh -c 'docker run -v $PWD/proxy:/proxy -w /proxy -e CGO_ENABLED=0 golang:1.19.1-alpine3.16 go build -ldflags=\"-extldflags=-static\"'", withexitstatus=True)
+            if err != 0:
+                #TODO
+                raise Exception(output.decode("utf-8"))
+
+            logging.debug("Copying the 'proxy' binary to the container")
+            output, err = pexpect.run("{kubectl} cp ./proxy/proxy {namespace}/{pod}:/bin/proxy -c {container}".format(
+                kubectl=self.args.kubectl_cmd,
+                namespace=self.args.namespace,
+                pod=self.args.pod,
+                container=self.args.container), withexitstatus=True)
+            if err != 0:
+                raise KubectlError("Cannot cp into the container: " + output.decode("utf-8"))
+
+        #TODO
+        oldFd = self.GetFDForTCPPort(str(80))
+        if oldFd is None:
+            #TODO
+            raise Exception("FD not found for port " + str(80))
+
+        logging.debug("Replacing tcp port with gdb")
+        output, err = pexpect.run("gdb -x move_tcp_socket.gdb -batch -ex 'set pagination off' -ex 'target extended-remote localhost:{local_port}' -ex 'move_tcp_socket ${old_fd} ${new_port}' -ex disconnect -ex 'set confirm off' -ex quit -ex quit".format(
+            local_port=self.local_port,
+            old_fd=oldFd,
+            new_port=9090), withexitstatus=True)
+
+        strOutput = output.decode("utf-8")
+        if err != 0:
+            raise GDBCommandException(strOutput)
+
+        if self.args.i_want_to_see_gdb_output or True:
+            logging.debug("GDB command output:\n{}".format(strOutput))
+
+        logging.info("Starting proxy to bypass http liveness probe")
+        #TODO
+        self.proxyChild = pexpect.spawn("{kubectl} exec -i -n {namespace} {pod} -c {container} -- proxy -srcport {src_port} -dstport {dst_port} -healthURL {healthURL}".format(
+            kubectl=self.args.kubectl_cmd,
+            namespace=self.args.namespace,
+            pod=self.args.pod,
+            container=self.args.container,
+            src_port=80,
+            dst_port=9090,
+            healthURL="/bela"))
+
+    def RestoreLivenessProbe(self):
+        if not self.proxyChild:
+            return
+
+        logging.debug("Sending SIGINT for proxy")
+        self.proxyChild.sendintr()
+        self.proxyChild.wait()
+        logging.debug("Proxy stopped")
+
+        #TODO
+        oldFd = self.GetFDForTCPPort(str(9090))
+        if oldFd is None:
+            #TODO
+            raise Exception("FD not found for port " + str(80))
+
+        #TODO
+        logging.debug("Replacing tcp port with gdb")
+        output, err = pexpect.run("gdb -x move_tcp_socket.gdb -batch -ex 'set pagination off' -ex 'target extended-remote localhost:{local_port}' -ex 'move_tcp_socket ${old_fd} ${new_port}' -ex disconnect -ex 'set confirm off' -ex quit -ex quit".format(
+            local_port=self.local_port,
+            old_fd=oldFd,
+            new_port=80), withexitstatus=True)
+
+        strOutput = output.decode("utf-8")
+        if err != 0:
+            raise GDBCommandException(strOutput)
+
+        logging.info("Liveness probe restored")
 
     def PrepareWithEphemeralContainer(self):
         logging.info("Ephemeral containers are supported, so using 'kubectl debug' for gdbserver")
@@ -295,6 +384,59 @@ class K8sGDBServer():
         if cpErr != 0:
             raise BuildStaticBinaryException("Cannot run docker cp: " + cpOutput.decode("utf-8"))
 
+    def GetFDForTCPPort(self, port):
+        logging.debug("Getting inode number for port " + port)
+        output, err = pexpect.run("{kubectl} exec -n {namespace} {pod} -c {container} -- cat /proc/net/tcp".format(
+            kubectl=self.args.kubectl_cmd,
+            namespace=self.args.namespace,
+            pod=self.args.pod,
+            container=self.args.container), withexitstatus=True)
+        
+        strOutput = output.decode("utf-8")
+        if err != 0:
+            raise GDBCommandException(strOutput)
+
+        if self.args.i_want_to_see_gdb_output:
+            logging.debug("GDB command output:\n{}".format(strOutput))
+
+        inode = None
+        for line in strOutput.splitlines():
+            if "local_address" in line:
+                continue
+
+            portNumber = int(line.split()[1][-4:], 16)
+
+            if portNumber == int(port):
+                inode = line.split()[9]
+                break
+
+        logging.debug("Getting fd number for inode " + inode)
+        output, err = pexpect.run("{kubectl} exec -n {namespace} {pod} -c {container} -- ls -lah /proc/{pid}/fd".format(
+            kubectl=self.args.kubectl_cmd,
+            namespace=self.args.namespace,
+            pod=self.args.pod,
+            container=self.args.container,
+            pid=self.args.pid), withexitstatus=True)
+        
+        strOutput = output.decode("utf-8")
+        if err != 0:
+            raise GDBCommandException(strOutput)
+
+        if self.args.i_want_to_see_gdb_output:
+            logging.debug("GDB command output:\n{}".format(strOutput))
+
+        for line in strOutput.splitlines():
+            if not "socket:[" + inode + "]" in line:
+                continue
+            
+            fd = line.split()[8]
+
+            logging.debug("The fd {fd} is used for port {port}".format(port=port, fd=fd))
+
+            return fd
+
+        return None
+
     def SigIntHandler(self, sig, frame):
         self.StopDebug()
 
@@ -314,6 +456,7 @@ if __name__ == "__main__":
     parser.add_argument("--i_want_to_see_gdb_output",  default=False, action="store_true", help="See the gdb command output in logs")
     parser.add_argument("--cleanup_prev_gdbserver", default=False, action="store_true", help="try do a cleanup for previous gdbserver session")
     parser.add_argument("--gcore", default=None, type=str, help="create core file at given path")
+    parser.add_argument("--bypass_liveness_probe",  default=False, action="store_true", help="try to bypass liveness probe")
 
     # Parse the arguments
     args = parser.parse_args()
@@ -344,6 +487,9 @@ if __name__ == "__main__":
 
             logging.debug("Initiate the gdbserver debug")
             k8sGDBServer.StartDebug()
+
+            if args.bypass_liveness_probe:
+                k8sGDBServer.BypassLivenessProbe()
 
             if args.gcore is None:
                 logging.info("Press Ctrl+C to close the gdbserver and portforward")
