@@ -49,14 +49,18 @@ class K8sGDBServer():
     def __init__(self, args):
         self.args = args
         self.portForwardChild = None
-        self.gdbServerCmd = ""
-        self.gdbServerChild = None
+        self.dbgServerCmd = ""
+        self.dbgServerChild = None
 
         self.version = GetKubernetesVersion(args.kubectl_cmd)
 
         self.local_port = ""
         if args.local_port:
             self.local_port = args.local_port
+
+        self.use_dlv = False
+        if args.golang:
+            self.use_dlv = args.golang
 
     def StartDebug(self):
         self.GetContainerName()
@@ -90,28 +94,33 @@ class K8sGDBServer():
     def CleanupPrevGDBServerSession(self):
         logging.info("Trying to cleanup previous gdbserver session in the container")
         self.GetContainerName()
-        self.StartPortForward()
         self.StopGDBServerRemotely()
-        self.StopPortForward()
 
     def GenerateCoreFile(self):
-        logging.info("Generating core file with gdb")
-        output, err = pexpect.run("gdb -batch -ex 'set pagination off' -ex 'target extended-remote localhost:{local_port}' -ex 'gcore {corefile}' -ex 'disconnect' -ex 'set confirm off' -ex quit -ex quit".format(
-            local_port=self.local_port,
-            corefile=self.args.gcore), withexitstatus=True)
+        logging.info("Generating core file")
+        if self.use_dlv:
+            # TODO corefile generation as command with dlv
+            output, err = pexpect.run("dlv connect localhost:{local_port} {corefile}".format(
+                local_port=self.local_port,
+                corefile=self.args.gcore), withexitstatus=True)
+        else:
+            output, err = pexpect.run("gdb -batch -ex 'set pagination off' -ex 'target extended-remote localhost:{local_port}' -ex 'gcore {corefile}' -ex 'disconnect' -ex 'set confirm off' -ex quit -ex quit".format(
+                local_port=self.local_port,
+                corefile=self.args.gcore), withexitstatus=True)
 
-        strOutput = output.decode("utf-8")
-        if err != 0:
-            raise GDBCommandException(strOutput)
+            strOutput = output.decode("utf-8")
+            if err != 0:
+                raise GDBCommandException(strOutput)
 
-        if self.args.i_want_to_see_gdb_output:
-            logging.debug("GDB command output:\n{}".format(strOutput))
+            if self.args.i_want_to_see_gdb_output:
+                logging.debug("GDB command output:\n{}".format(strOutput))
+
         logging.debug("Core file generation finished")
 
     def PrepareWithEphemeralContainer(self):
         logging.info("Ephemeral containers are supported, so using 'kubectl debug' for gdbserver")
 
-        self.gdbServerCmd = "{kubectl} debug -n {namespace} {pod} --image=albertdupre/gdbserver:latest --target={container} -i -- sh -c 'sleep 5 ; gdbserver --attach localhost:{port} {pid}'".format(
+        self.dbgServerCmd = "{kubectl} debug -n {namespace} {pod} --image=albertdupre/gdbserver:latest --target={container} -i -- sh -c 'sleep 5 ; gdbserver --attach localhost:{port} {pid}'".format(
             kubectl=self.args.kubectl_cmd,
             namespace=self.args.namespace,
             pod=self.args.pod,
@@ -120,29 +129,43 @@ class K8sGDBServer():
             container=self.args.container)
 
     def PrepareWithKubectlCP(self):
-        logging.info("Using the kubectl cp for setting up gdbserver")
+        debugger = 'gdbserver'
+        if self.use_dlv:
+            debugger = 'dlv'
 
-        if not self.IsExecutableInContainerImage('gdbserver'):
-            logging.debug("'gdbserver' is not present on the container")
+        logging.info("Using the kubectl cp for setting up '{}'".format(debugger))
 
-            self.BuildStaticBinary("gdbserver")
+        if not self.IsExecutableInContainerImage(debugger):
+            logging.debug("'{}' is not present on the container".format(debugger))
 
-            logging.debug("Copying the 'gdbserver' binary to the container")
-            output, err = pexpect.run("{kubectl} cp ./gdbserver {namespace}/{pod}:/tmp/gdbserver -c {container}".format(
+            self.BuildStaticBinary(debugger)
+
+            logging.debug("Copying the '{}' binary to the container".format(debugger))
+            output, err = pexpect.run("{kubectl} cp ./{debugger} {namespace}/{pod}:/tmp/{debugger} -c {container}".format(
                 kubectl=self.args.kubectl_cmd,
                 namespace=self.args.namespace,
                 pod=self.args.pod,
-                container=self.args.container), withexitstatus=True)
+                container=self.args.container,
+                debugger=debugger), withexitstatus=True)
             if err != 0:
                 raise KubectlError("Cannot cp into the container: " + output.decode("utf-8"))
 
-        self.gdbServerCmd = "{kubectl} exec -n {namespace} {pod} -c {container} -- /tmp/gdbserver --attach localhost:{port} {pid}".format(
-            kubectl=self.args.kubectl_cmd,
-            namespace=self.args.namespace,
-            pod=self.args.pod,
-            container=self.args.container,
-            port=self.args.remote_port,
-            pid=self.args.pid)
+        if self.use_dlv:
+            self.dbgServerCmd = "{kubectl} exec -n {namespace} {pod} -c {container} -- /tmp/dlv --headless --accept-multiclient --only-same-user=false --api-version=2 --listen localhost:{port} attach {pid}".format(
+                kubectl=self.args.kubectl_cmd,
+                namespace=self.args.namespace,
+                pod=self.args.pod,
+                container=self.args.container,
+                port=self.args.remote_port,
+                pid=self.args.pid)
+        else:
+            self.dbgServerCmd = "{kubectl} exec -n {namespace} {pod} -c {container} -- /tmp/gdbserver --attach localhost:{port} {pid}".format(
+                kubectl=self.args.kubectl_cmd,
+                namespace=self.args.namespace,
+                pod=self.args.pod,
+                container=self.args.container,
+                port=self.args.remote_port,
+                pid=self.args.pid)
 
     def IsExecutableInContainerImage(self, execName):
         logging.debug("Finding out that the {} is present in container".format(execName))
@@ -154,8 +177,18 @@ class K8sGDBServer():
             execName=execName), withexitstatus=True)
 
         if err != 0:
-            logging.warning("{} is not present in container".format(execName))
-            return False
+            logging.info("{} is not present in container on PATH, trying it in the /tmp".format(execName))
+
+            output, err = pexpect.run("{kubectl} exec -n {namespace} {pod} -c {container} -- /tmp/{execName} --help".format(
+                kubectl=self.args.kubectl_cmd,
+                namespace=self.args.namespace,
+                pod=self.args.pod,
+                container=self.args.container,
+                execName=execName), withexitstatus=True)
+
+            if err != 0:
+                logging.info("{} is not present in container on PATH".format(execName))
+                return False
 
         logging.debug("{} is present in container".format(execName))
         return True
@@ -205,37 +238,44 @@ class K8sGDBServer():
 
     def StartGDBServer(self):
         logging.info("Starting gdbserver")
-        self.gdbServerChild = pexpect.spawn(self.gdbServerCmd)
+        self.dbgServerChild = pexpect.spawn(self.dbgServerCmd)
 
-        index = self.gdbServerChild.expect([".*Listening on port ", ".*Can't bind address: Address in use."])
+        index = -1
+        if self.use_dlv:
+            index = self.dbgServerChild.expect([".*API server listening at: ", ".*bind: address already in use.", pexpect.EOF, pexpect.TIMEOUT])
+        else:
+            index = self.dbgServerChild.expect([".*Listening on port ", ".*Can't bind address: Address in use.", pexpect.EOF, pexpect.TIMEOUT])
         if index == 0:
             logging.debug("The remote gdbserver port is " + str(self.args.remote_port))
-        else:
+        elif index == 1:
             logging.error("The port is occupied")
             raise GDBCommandException("Address in use")
+        else:
+            # TODO write some output about the failure
+            logging.error("Some error occurred")
+            raise GDBCommandException("Some error occurred")
 
     def StopGDBServer(self):
         logging.info("Stopping gdbserver")
         self.StopGDBServerRemotely()
 
-        if self.gdbServerChild.isalive():
+        if self.dbgServerChild.isalive():
             logging.debug("Sending SIGINT to local gdbserver session")
-            self.gdbServerChild.sendintr()
-            self.gdbServerChild.wait()
+            self.dbgServerChild.sendintr()
+            self.dbgServerChild.wait()
             logging.debug("Gdbserver stopped")
 
     def StopGDBServerRemotely(self):
-        logging.debug("Stopping the remote gdbserver session")
-        output, err = pexpect.run("gdb -batch -ex 'set pagination off' -ex 'target extended-remote localhost:{}' -ex 'monitor exit' -ex 'set confirm off' -ex quit -ex quit".format(
-            self.local_port), withexitstatus=True)
+        logging.debug("Stopping the remote debugger session")
 
-        strOutput = output.decode("utf-8")
+        output, err = pexpect.run("{kubectl} exec -n {namespace} {pod} -c {container} -- sh -c 'kill -INT `ps aux | grep -Ew \"gdbserver|dlv\" | grep -v grep | tr -s \" \" | cut -d \" \" -f 2`'".format(
+            kubectl=self.args.kubectl_cmd,
+            namespace=self.args.namespace,
+            pod=self.args.pod,
+            container=self.args.container), withexitstatus=True)
         if err != 0:
-            raise GDBCommandException(strOutput)
-
-        if self.args.i_want_to_see_gdb_output:
-            logging.debug("GDB command output:\n{}".format(strOutput))
-        logging.debug("Remote gdbserver session closed")
+            raise KubectlError("Error during killing debugger: " + output.decode("utf-8"))
+        logging.debug("Remote debugger session closed")
 
     def GetContainerName(self):
         if not self.args.container:
@@ -314,6 +354,7 @@ if __name__ == "__main__":
     parser.add_argument("--i_want_to_see_gdb_output",  default=False, action="store_true", help="See the gdb command output in logs")
     parser.add_argument("--cleanup_prev_gdbserver", default=False, action="store_true", help="try do a cleanup for previous gdbserver session")
     parser.add_argument("--gcore", default=None, type=str, help="create core file at given path")
+    parser.add_argument("--golang", default=False, action="store_true", help="run dlv server for golang debug")
 
     # Parse the arguments
     args = parser.parse_args()

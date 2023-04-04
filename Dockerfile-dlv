@@ -1,0 +1,14 @@
+# TODO alpine version as argument
+# TODO repo as argument
+# TODO dlv version as argument
+
+FROM golang:1.20.2-alpine3.17
+
+RUN apk add binutils
+
+RUN go install github.com/go-delve/delve/cmd/dlv@v1.20.1
+
+RUN mkdir build && \
+        cp /go/bin/dlv /build/dlv
+
+RUN strip -s -R .comment -R .gnu.version --strip-unneeded /build/dlv
