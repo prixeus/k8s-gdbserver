@@ -24,9 +24,9 @@ class BuildStaticBinaryException(Exception):
     def __init__(self, message):
         super().__init__("Cannot create static binary: " + message)
 
-class GDBCommandException(Exception):
+class DbgCommandException(Exception):
     def __init__(self, message):
-        super().__init__("GDB command error: " + message)
+        super().__init__("Debugger command error: " + message)
 
 
 def GetKubernetesVersion(kubectl_cmd):
@@ -45,7 +45,7 @@ def GetKubernetesVersion(kubectl_cmd):
     logging.warning("Cannot get the kubernetes version")
     return ""
 
-class K8sGDBServer():
+class K8sDbgServer():
     def __init__(self, args):
         self.args = args
         self.portForwardChild = None
@@ -70,7 +70,7 @@ class K8sGDBServer():
         else:
             if not self.IsExecutableInContainerImage("tar"):
                 if not self.IsExecutableInContainerImage("tee"):
-                    logging.critical("Cannot move gdbserver into the container")
+                    logging.critical("Cannot move debug server into the container")
                     exit(-1)
                 else:
                     self.TryToAddTarExecutable()
@@ -79,22 +79,22 @@ class K8sGDBServer():
 
         self.StartPortForward()
         try:
-            self.StartGDBServer()
+            self.StartDebugServer()
         except:
             self.StopDebug()
             raise
 
-        logging.info("Port fordwarded gdbserver is listening on localhost:" + str(self.local_port))
+        logging.info("Port fordwarded debugger is listening on localhost:" + str(self.local_port))
 
     def StopDebug(self):
         logging.info("Stopping debug")
-        self.StopGDBServer()
+        self.StopDebugServer()
         self.StopPortForward()
 
-    def CleanupPrevGDBServerSession(self):
-        logging.info("Trying to cleanup previous gdbserver session in the container")
+    def CleanupPrevDebuggerServerSession(self):
+        logging.info("Trying to cleanup previous debugger session in the container")
         self.GetContainerName()
-        self.StopGDBServerRemotely()
+        self.StopDebugServerRemotely()
 
     def GenerateCoreFile(self):
         logging.info("Generating core file")
@@ -108,12 +108,12 @@ class K8sGDBServer():
                 local_port=self.local_port,
                 corefile=self.args.gcore), withexitstatus=True)
 
-            strOutput = output.decode("utf-8")
-            if err != 0:
-                raise GDBCommandException(strOutput)
+        strOutput = output.decode("utf-8")
+        if err != 0:
+            raise DbgCommandException(strOutput)
 
-            if self.args.i_want_to_see_gdb_output:
-                logging.debug("GDB command output:\n{}".format(strOutput))
+        if self.args.i_want_to_see_debugger_output:
+            logging.debug("debugger command output:\n{}".format(strOutput))
 
         logging.debug("Core file generation finished")
 
@@ -187,7 +187,7 @@ class K8sGDBServer():
                 execName=execName), withexitstatus=True)
 
             if err != 0:
-                logging.info("{} is not present in container on PATH".format(execName))
+                logging.info("{} is not present in container in the /tmp".format(execName))
                 return False
 
         logging.debug("{} is present in container".format(execName))
@@ -228,7 +228,7 @@ class K8sGDBServer():
         self.portForwardChild.expect("Forwarding from .* ->")
 
         self.local_port = self.portForwardChild.after.decode("utf-8").splitlines()[0].split(":")[1].split(" -> ")[0]
-        logging.debug("The local gdbserver port is " + self.local_port)
+        logging.debug("The local debugger port is " + self.local_port)
 
     def StopPortForward(self):
         logging.debug("Sending SIGINT for portforward")
@@ -236,8 +236,8 @@ class K8sGDBServer():
         self.portForwardChild.wait()
         logging.debug("Portforward stopped")
 
-    def StartGDBServer(self):
-        logging.info("Starting gdbserver")
+    def StartDebugServer(self):
+        logging.info("Starting debugger")
         self.dbgServerChild = pexpect.spawn(self.dbgServerCmd)
 
         index = -1
@@ -246,26 +246,26 @@ class K8sGDBServer():
         else:
             index = self.dbgServerChild.expect([".*Listening on port ", ".*Can't bind address: Address in use.", pexpect.EOF, pexpect.TIMEOUT])
         if index == 0:
-            logging.debug("The remote gdbserver port is " + str(self.args.remote_port))
+            logging.debug("The remote debugger port is " + str(self.args.remote_port))
         elif index == 1:
             logging.error("The port is occupied")
-            raise GDBCommandException("Address in use")
+            raise DbgCommandException("Address in use")
         else:
             # TODO write some output about the failure
             logging.error("Some error occurred")
-            raise GDBCommandException("Some error occurred")
+            raise DbgCommandException("Some error occurred")
 
-    def StopGDBServer(self):
-        logging.info("Stopping gdbserver")
-        self.StopGDBServerRemotely()
+    def StopDebugServer(self):
+        logging.info("Stopping debugger")
+        self.StopDebugServerRemotely()
 
         if self.dbgServerChild.isalive():
-            logging.debug("Sending SIGINT to local gdbserver session")
+            logging.debug("Sending SIGINT to local debugger session")
             self.dbgServerChild.sendintr()
             self.dbgServerChild.wait()
-            logging.debug("Gdbserver stopped")
+            logging.debug("Debugger stopped")
 
-    def StopGDBServerRemotely(self):
+    def StopDebugServerRemotely(self):
         logging.debug("Stopping the remote debugger session")
 
         output, err = pexpect.run("{kubectl} exec -n {namespace} {pod} -c {container} -- sh -c 'kill -INT `ps aux | grep -Ew \"gdbserver|dlv\" | grep -v grep | tr -s \" \" | cut -d \" \" -f 2`'".format(
@@ -340,19 +340,19 @@ class K8sGDBServer():
 
 if __name__ == "__main__":
     # Prepare argument parser
-    parser = argparse.ArgumentParser(description="A tool for helping to debug with gdb running kubernetes containers")
+    parser = argparse.ArgumentParser(description="A tool for helping to debug with gdb or dlv running kubernetes containers")
 
     parser.add_argument("-n", "--namespace", default="default", help="K8s namespace of the pod")
-    parser.add_argument("pod", help="K8s pod for gdb debug")
+    parser.add_argument("pod", help="K8s pod for debug")
     parser.add_argument("-c", "--container", required=False, help="container to debug in pod (if there are more than one containers present in pod then it should be provided")
-    parser.add_argument("-p", "--pid", default=1, type=int, help="PID in container to attach the gdbserver")
-    parser.add_argument("-l", "--local_port", required=False, type=int, help="local port to use the gdbserver (if not provided the a free one will be selected")
-    parser.add_argument("-r", "--remote_port", default=2000, type=int, help="remote port in container to use the gdbserver")
+    parser.add_argument("-p", "--pid", default=1, type=int, help="PID in container to attach the debug server")
+    parser.add_argument("-l", "--local_port", required=False, type=int, help="local port to use the debug server (if not provided the a free one will be selected")
+    parser.add_argument("-r", "--remote_port", default=2000, type=int, help="remote port in container to use the debug server")
     parser.add_argument("--kubectl_cmd", default="kubectl", help="path to kubectl executable")
     parser.add_argument("--docker_cmd", default="docker", help="path to docker executable")
     parser.add_argument("--log", dest="logLevel", choices=['DEBUG', "INFO", "ERROR"], default="INFO", help="Set the log level")
-    parser.add_argument("--i_want_to_see_gdb_output",  default=False, action="store_true", help="See the gdb command output in logs")
-    parser.add_argument("--cleanup_prev_gdbserver", default=False, action="store_true", help="try do a cleanup for previous gdbserver session")
+    parser.add_argument("--i_want_to_see_debugger_output",  default=False, action="store_true", help="See the debugger command output in logs")
+    parser.add_argument("--cleanup_prev_dbgserver", default=False, action="store_true", help="try do a cleanup for previous debug server session")
     parser.add_argument("--gcore", default=None, type=str, help="create core file at given path")
     parser.add_argument("--golang", default=False, action="store_true", help="run dlv server for golang debug")
 
@@ -370,28 +370,24 @@ if __name__ == "__main__":
         if not pexpect.which(args.docker_cmd):
             raise ExecutableNotFound(args.docker_cmd)
 
-        logging.debug("Evaluate that the 'gdb' command is found")
-        if not pexpect.which("gdb"):
-            raise ExecutableNotFound("gdb")
+        k8sDbgServer = K8sDbgServer(args)
 
-        k8sGDBServer = K8sGDBServer(args)
-
-        if args.cleanup_prev_gdbserver:
-            k8sGDBServer.CleanupPrevGDBServerSession()
+        if args.cleanup_prev_dbgserver:
+            k8sDbgServer.CleanupPrevDebuggerServerSession()
         else:
             if args.gcore is None:
                 logging.debug("Setting SIGINT handler")
-                signal.signal(signal.SIGINT, k8sGDBServer.SigIntHandler)
+                signal.signal(signal.SIGINT, k8sDbgServer.SigIntHandler)
 
-            logging.debug("Initiate the gdbserver debug")
-            k8sGDBServer.StartDebug()
+            logging.debug("Initiate the remote debugger")
+            k8sDbgServer.StartDebug()
 
             if args.gcore is None:
-                logging.info("Press Ctrl+C to close the gdbserver and portforward")
+                logging.info("Press Ctrl+C to close the debugger and portforward")
                 signal.pause()
             else:
-                k8sGDBServer.GenerateCoreFile()
-                k8sGDBServer.StopDebug()
+                k8sDbgServer.GenerateCoreFile()
+                k8sDbgServer.StopDebug()
 
     except Exception as e:
         logging.error("Exception occurred", exc_info=True)

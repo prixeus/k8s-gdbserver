@@ -8,7 +8,7 @@ RUN apk add binutils
 
 RUN go install github.com/go-delve/delve/cmd/dlv@v1.20.1
 
-RUN mkdir build && \
+RUN mkdir /build && \
         cp /go/bin/dlv /build/dlv
 
 RUN strip -s -R .comment -R .gnu.version --strip-unneeded /build/dlv
