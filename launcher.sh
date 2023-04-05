@@ -48,7 +48,7 @@ function_start_k8s_dbgserver () {
 
     echo "Starting k8s-dbgserver"
 
-    python3 k8s-dbgserver.py -n "${NAMESPACE}" "${POD_NAME}" -c "${CONT_NAME}" -p "${PID}" ${GOLANG} &> "${LOGFILE}" &
+    nohup python3 k8s-dbgserver.py -n "${NAMESPACE}" "${POD_NAME}" -c "${CONT_NAME}" -p "${PID}" ${GOLANG} &> "${LOGFILE}" &
     echo "$!" > "${PIDFILE}"
 
     TRY=0
