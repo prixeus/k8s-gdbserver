@@ -84,7 +84,7 @@ class K8sDbgServer():
             self.StopDebug()
             raise
 
-        logging.info("Port fordwarded debugger is listening on localhost:" + str(self.local_port))
+        logging.info("Port forwarded debugger is listening on localhost:" + str(self.local_port))
 
     def StopDebug(self):
         logging.info("Stopping debug")
@@ -242,7 +242,7 @@ class K8sDbgServer():
             local_port=self.local_port,
             remote_port=self.args.remote_port))
 
-        self.portForwardChild.expect("Forwarding from .* ->")
+        self.portForwardChild.expect("Forwarding from .* -> ")
 
         self.local_port = self.portForwardChild.after.decode("utf-8").splitlines()[0].split(":")[1].split(" -> ")[0]
         logging.debug("The local debugger port is " + self.local_port)
