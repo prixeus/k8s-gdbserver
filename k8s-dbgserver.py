@@ -99,10 +99,27 @@ class K8sDbgServer():
     def GenerateCoreFile(self):
         logging.info("Generating core file")
         if self.use_dlv:
-            # TODO corefile generation as command with dlv
-            output, err = pexpect.run("dlv connect localhost:{local_port} {corefile}".format(
+            output, err = pexpect.run("echo \"dump /tmp/{corefile}\" | dlv connect localhost:{local_port}".format(
                 local_port=self.local_port,
                 corefile=self.args.gcore), withexitstatus=True)
+
+            output2, err2 = pexpect.run("{kubectl} cp {namespace}/{pod}:/tmp/{corefile} {corefile} -c {container}".format(
+                kubectl=self.args.kubectl_cmd,
+                namespace=self.args.namespace,
+                pod=self.args.pod,
+                container=self.args.container,
+                corefile=self.args.gcore), withexitstatus=True)
+            if err2 != 0:
+                raise KubectlError("Cannot cp from the container: " + output2.decode("utf-8"))
+
+            output3, err3 = pexpect.run("{kubectl} exec -n {namespace} {pod} -c {container} -- rm /tmp/{corefile}".format(
+                kubectl=self.args.kubectl_cmd,
+                namespace=self.args.namespace,
+                pod=self.args.pod,
+                container=self.args.container,
+                corefile=self.args.gcore), withexitstatus=True)
+            if err3 != 0:
+                raise KubectlError("Cannot remove temporary file from the container: " + output3.decode("utf-8"))
         else:
             output, err = pexpect.run("gdb -batch -ex 'set pagination off' -ex 'target extended-remote localhost:{local_port}' -ex 'gcore {corefile}' -ex 'disconnect' -ex 'set confirm off' -ex quit -ex quit".format(
                 local_port=self.local_port,
