@@ -99,7 +99,7 @@ class K8sDbgServer():
     def GenerateCoreFile(self):
         logging.info("Generating core file")
         if self.use_dlv:
-            output, err = pexpect.run("echo \"dump /tmp/{corefile}\" | dlv connect localhost:{local_port}".format(
+            output, err = pexpect.run("sh -c 'echo \"dump /tmp/{corefile}\" | dlv connect localhost:{local_port} || true'".format(
                 local_port=self.local_port,
                 corefile=self.args.gcore), withexitstatus=True)
 
