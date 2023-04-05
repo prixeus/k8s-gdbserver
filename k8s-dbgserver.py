@@ -408,3 +408,4 @@ if __name__ == "__main__":
 
     except Exception as e:
         logging.error("Exception occurred", exc_info=True)
+        exit(-2)
