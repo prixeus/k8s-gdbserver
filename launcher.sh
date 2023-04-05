@@ -1,6 +1,7 @@
 #!/bin/bash
 
 CONFIGFILE="k8s-dbgserver.json"
+COREFILE=""
 NAMESPACE=""
 POD_NAME=""
 CONT_NAME=""
@@ -114,8 +115,18 @@ function_stop_k8s_dbgserver () {
     rm -f "${PIDFILE}" "${PORTFILE}"
 }
 
+function_gen_coredump () {
+    if ! python3 k8s-dbgserver.py -n "${NAMESPACE}" "${POD_NAME}" -c "${CONT_NAME}" -p "${PID}" ${GOLANG} --gcore "${COREFILE}" --log DEBUG &> "${LOGFILE}" ; then
+        echo "Error happened during generating coredump, see the logs:"
+        cat "${LOGFILE}"
+
+        exit 4
+    fi
+}
+
 function_help () {
     echo "Usage: $0 { start | stop } [ CONFIGFILE ]"
+    echo "Generating core files: $0 coredump [ CONFIGFILE ] FILENAME"
 }
 
 if [ "$#" -eq 0 ]; then
@@ -125,7 +136,16 @@ fi
 ACTION=$1
 
 if [ "$#" -eq 2 ]; then
+    if [ "${ACTION}" == "coredump" ]; then
+        COREFILE=$2
+    else
+        CONFIGFILE=$2
+    fi
+fi
+
+if [ "$#" -eq 3 ]; then
     CONFIGFILE=$2
+    COREFILE=$3
 fi
 
 function_get_config
@@ -136,4 +156,8 @@ fi
 
 if [ "${ACTION}" == "stop" ]; then
     function_stop_k8s_dbgserver
+fi
+
+if [ "${ACTION}" == "coredump" ]; then
+    function_gen_coredump
 fi
